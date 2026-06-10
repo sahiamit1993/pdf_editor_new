@@ -5,6 +5,8 @@
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>PDF Editor</title>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/jspdf/2.5.1/jspdf.umd.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/FileSaver.js/2.0.5/FileSaver.min.js"></script>
 <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.5.0/css/all.min.css">
 <style>
   :root {
@@ -283,6 +285,25 @@
   }
   .toast.show { opacity: 1; }
 
+  /* Download modal */
+  .dl-options { display: flex; gap: 12px; margin: 4px 0 8px; }
+  .dl-option {
+    flex: 1; border: 2px solid var(--border); border-radius: 12px; padding: 18px 10px;
+    text-align: center; cursor: pointer; transition: all 0.15s; background: var(--surface);
+  }
+  .dl-option:hover { border-color: var(--accent); background: var(--accent-light); }
+  .dl-option.selected { border-color: var(--accent); background: var(--accent-light); }
+  .dl-option i { font-size: 28px; display: block; margin-bottom: 8px; }
+  .dl-option .dl-label { font-size: 13px; font-weight: 600; }
+  .dl-option .dl-desc { font-size: 11px; color: var(--text-muted); margin-top: 3px; }
+  .dl-option.pdf i { color: #e2534a; }
+  .dl-option.png i { color: #4f7ef8; }
+  .dl-option.word i { color: #2b5fb3; }
+  .dl-progress { display: none; align-items: center; gap: 10px; margin-top: 12px; padding: 10px 14px; background: var(--accent-light); border-radius: 8px; }
+  .dl-progress.show { display: flex; }
+  .dl-progress-bar { flex: 1; height: 6px; background: var(--border); border-radius: 3px; overflow: hidden; }
+  .dl-progress-fill { height: 100%; background: var(--accent); border-radius: 3px; width: 0%; transition: width 0.3s; }
+
   /* Scrollbars */
   ::-webkit-scrollbar { width: 6px; height: 6px; }
   ::-webkit-scrollbar-track { background: transparent; }
@@ -343,7 +364,7 @@
   <div class="header-spacer"></div>
   <span style="font-size:12px;color:var(--text-muted);margin-right:4px" id="doc-name">document.pdf</span>
   <button class="header-btn" id="new-file-btn"><i class="fa-solid fa-file-circle-plus"></i> New</button>
-  <button class="header-btn primary" id="download-btn" disabled><i class="fa-solid fa-download"></i> Download</button>
+  <button class="header-btn primary" id="download-btn" disabled onclick="openModal('download-modal')"><i class="fa-solid fa-download"></i> Download</button>
 </header>
 
 <!-- Toolbar -->
@@ -541,6 +562,45 @@
 
 <!-- Image input -->
 <input type="file" id="image-input" accept="image/*" style="display:none">
+
+<!-- Download Modal -->
+<div class="modal-overlay" id="download-modal">
+  <div class="modal" style="max-width:460px">
+    <button class="modal-close" onclick="closeModal('download-modal')"><i class="fa-solid fa-xmark"></i></button>
+    <h3><i class="fa-solid fa-download" style="color:var(--accent);margin-right:8px"></i>Download Edited Document</h3>
+    <p style="font-size:13px;color:var(--text-muted);margin-bottom:16px">Choose your preferred format:</p>
+    <div class="dl-options">
+      <div class="dl-option pdf selected" data-fmt="pdf" onclick="selectDlFmt('pdf')">
+        <i class="fa-solid fa-file-pdf"></i>
+        <div class="dl-label">PDF</div>
+        <div class="dl-desc">Best for sharing</div>
+      </div>
+      <div class="dl-option png" data-fmt="png" onclick="selectDlFmt('png')">
+        <i class="fa-solid fa-file-image"></i>
+        <div class="dl-label">PNG Image</div>
+        <div class="dl-desc">High quality image</div>
+      </div>
+      <div class="dl-option word" data-fmt="word" onclick="selectDlFmt('word')">
+        <i class="fa-solid fa-file-word"></i>
+        <div class="dl-label">Word (.docx)</div>
+        <div class="dl-desc">Editable document</div>
+      </div>
+    </div>
+    <div class="dl-progress" id="dl-progress">
+      <i class="fa-solid fa-spinner fa-spin" style="color:var(--accent)"></i>
+      <div style="flex:1">
+        <div style="font-size:12px;margin-bottom:4px" id="dl-progress-label">Preparing…</div>
+        <div class="dl-progress-bar"><div class="dl-progress-fill" id="dl-progress-fill"></div></div>
+      </div>
+    </div>
+    <div class="modal-actions" style="margin-top:16px">
+      <button class="modal-btn" onclick="closeModal('download-modal')">Cancel</button>
+      <button class="modal-btn primary" id="dl-confirm-btn" onclick="doDownload()">
+        <i class="fa-solid fa-download"></i> Download
+      </button>
+    </div>
+  </div>
+</div>
 
 <div class="toast" id="toast"></div>
 
@@ -1151,56 +1211,147 @@ function restoreState(stateStr) {
   updateAnnotationList();
 }
 
-// ── Download ─────────────────────────────────────────────────
-document.getElementById('download-btn').addEventListener('click', async () => {
-  showToast('Preparing download…');
-  // Flatten to canvas and download as PNG (visual export)
+// ── Download format selection ─────────────────────────────────
+let selectedDlFmt = 'pdf';
+
+function selectDlFmt(fmt) {
+  selectedDlFmt = fmt;
+  document.querySelectorAll('.dl-option').forEach(o => o.classList.toggle('selected', o.dataset.fmt === fmt));
+}
+
+async function buildMergedCanvas() {
   const merged = document.createElement('canvas');
   merged.width = pdfCanvas.width; merged.height = pdfCanvas.height;
   const mctx = merged.getContext('2d');
+  mctx.fillStyle = '#ffffff';
+  mctx.fillRect(0, 0, merged.width, merged.height);
   mctx.drawImage(pdfCanvas, 0, 0);
   mctx.drawImage(drawingCanvas, 0, 0);
-
-  // Draw overlay elements
   const els = overlay.querySelectorAll('.drag-element');
   for (const el of els) {
-    const x = parseInt(el.style.left), y = parseInt(el.style.top);
+    const x = parseInt(el.style.left) || 0, y = parseInt(el.style.top) || 0;
     const w = el.offsetWidth, h = el.offsetHeight;
     const span = el.querySelector('span');
-    const img = el.querySelector('img');
-    const a = el.querySelector('a');
-
-    if (img) {
-      const i = new Image(); i.src = img.src;
+    const imgEl = el.querySelector('img');
+    const aEl = el.querySelector('a');
+    if (imgEl) {
+      const i = new Image(); i.crossOrigin = 'anonymous'; i.src = imgEl.src;
       await new Promise(r => { i.onload = r; i.onerror = r; });
-      mctx.drawImage(i, x, y, img.offsetWidth || 120, img.offsetHeight || 80);
+      mctx.drawImage(i, x, y, imgEl.offsetWidth || 120, imgEl.offsetHeight || 80);
     } else if (span) {
-      mctx.font = span.style.fontSize + ' ' + (span.style.fontFamily || 'Arial');
+      const fs = span.style.fontSize || '14px';
+      const ff = span.style.fontFamily || 'Arial';
+      mctx.font = `${span.style.fontWeight || ''} ${span.style.fontStyle || ''} ${fs} ${ff}`.trim();
       mctx.fillStyle = span.style.color || '#000';
-      mctx.fillText(span.textContent, x + 4, y + parseInt(span.style.fontSize) + 2);
-    } else if (a) {
+      mctx.fillText(span.textContent, x + 4, y + (parseInt(fs) || 14) + 2);
+    } else if (aEl) {
       mctx.font = '14px Arial'; mctx.fillStyle = '#4f7ef8';
-      mctx.fillText(a.textContent, x + 4, y + 16);
+      mctx.fillText(aEl.textContent, x + 4, y + 16);
     } else {
-      const bg = getComputedStyle(el).background;
-      if (bg && !bg.includes('rgba(0,0,0,0)')) {
-        mctx.fillStyle = el.style.background || 'rgba(79,126,248,0.1)';
-        if (el.classList.contains('ellipse-shape')) {
-          mctx.beginPath(); mctx.ellipse(x + w/2, y + h/2, w/2, h/2, 0, 0, Math.PI*2);
-          mctx.fill();
-        } else {
-          mctx.fillRect(x, y, w, h);
-        }
+      const type = el.dataset.type;
+      if (type === 'whiteout') { mctx.fillStyle = '#ffffff'; mctx.fillRect(x, y, w, h); }
+      else if (type === 'highlight') { mctx.fillStyle = 'rgba(255,241,118,0.6)'; mctx.fillRect(x, y, w, h); }
+      else if (type === 'rect') {
+        mctx.strokeStyle = '#4f7ef8'; mctx.lineWidth = 2;
+        mctx.fillStyle = 'rgba(79,126,248,0.1)';
+        mctx.fillRect(x, y, w, h); mctx.strokeRect(x, y, w, h);
+      } else if (type === 'ellipse') {
+        mctx.strokeStyle = '#4f7ef8'; mctx.lineWidth = 2;
+        mctx.fillStyle = 'rgba(79,126,248,0.1)';
+        mctx.beginPath(); mctx.ellipse(x + w/2, y + h/2, w/2, h/2, 0, 0, Math.PI*2);
+        mctx.fill(); mctx.stroke();
       }
     }
   }
+  return merged;
+}
 
-  const url = merged.toDataURL('image/png');
-  const a = document.createElement('a');
-  a.href = url; a.download = fileName.replace('.pdf', '_edited.png');
-  a.click();
-  showToast('Downloaded as PNG (visual export)');
-});
+function setDlProgress(label, pct) {
+  document.getElementById('dl-progress').classList.add('show');
+  document.getElementById('dl-progress-label').textContent = label;
+  document.getElementById('dl-progress-fill').style.width = pct + '%';
+}
+function hideDlProgress() {
+  document.getElementById('dl-progress').classList.remove('show');
+  document.getElementById('dl-progress-fill').style.width = '0%';
+}
+
+async function doDownload() {
+  const btn = document.getElementById('dl-confirm-btn');
+  btn.disabled = true;
+  const baseName = fileName.replace(/\.pdf$/i, '');
+
+  try {
+    if (selectedDlFmt === 'png') {
+      setDlProgress('Rendering page…', 30);
+      const merged = await buildMergedCanvas();
+      setDlProgress('Encoding image…', 70);
+      await new Promise(r => setTimeout(r, 80));
+      setDlProgress('Saving PNG…', 95);
+      const url = merged.toDataURL('image/png');
+      const a = document.createElement('a');
+      a.href = url; a.download = baseName + '_edited.png'; a.click();
+      setDlProgress('Done!', 100);
+      setTimeout(() => { hideDlProgress(); closeModal('download-modal'); showToast('Downloaded as PNG ✓'); }, 700);
+
+    } else if (selectedDlFmt === 'pdf') {
+      setDlProgress('Rendering page…', 20);
+      const merged = await buildMergedCanvas();
+      setDlProgress('Building PDF…', 50);
+      const { jsPDF } = window.jspdf;
+      const imgData = merged.toDataURL('image/jpeg', 0.95);
+      const pw = merged.width, ph = merged.height;
+      // A4 in mm: 210 x 297, scale to fit
+      const mmW = 210, mmH = Math.round((ph / pw) * 210);
+      const pdf = new jsPDF({ orientation: mmH > mmW ? 'p' : 'l', unit: 'mm', format: [mmW, mmH] });
+      setDlProgress('Adding content…', 75);
+      pdf.addImage(imgData, 'JPEG', 0, 0, mmW, mmH);
+      setDlProgress('Saving PDF…', 95);
+      await new Promise(r => setTimeout(r, 80));
+      pdf.save(baseName + '_edited.pdf');
+      setDlProgress('Done!', 100);
+      setTimeout(() => { hideDlProgress(); closeModal('download-modal'); showToast('Downloaded as PDF ✓'); }, 700);
+
+    } else if (selectedDlFmt === 'word') {
+      setDlProgress('Rendering page…', 20);
+      const merged = await buildMergedCanvas();
+      setDlProgress('Converting to image…', 45);
+      const imgData = merged.toDataURL('image/png');
+      const b64 = imgData.split(',')[1];
+      setDlProgress('Building Word document…', 70);
+      // Build a minimal .docx with the page as an embedded image
+      // We'll use an HTML-based .doc that Word can open
+      const w = merged.width, h = merged.height;
+      const ratio = h / w;
+      const docW = 17; // cm width in word
+      const docH = (docW * ratio).toFixed(2);
+      const htmlDoc = `<html xmlns:o="urn:schemas-microsoft-com:office:office"
+xmlns:w="urn:schemas-microsoft-com:office:word"
+xmlns="http://www.w3.org/TR/REC-html40">
+<head><meta charset="utf-8">
+<style>
+  @page { size: 21cm ${(docH)}cm; margin: 0; }
+  body { margin: 0; padding: 0; }
+  img { width: ${docW}cm; height: ${docH}cm; display: block; }
+</style></head>
+<body><img src="${imgData}" /></body></html>`;
+      setDlProgress('Saving Word file…', 90);
+      await new Promise(r => setTimeout(r, 80));
+      const blob = new Blob([htmlDoc], { type: 'application/msword' });
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement('a'); a.href = url; a.download = baseName + '_edited.doc'; a.click();
+      URL.revokeObjectURL(url);
+      setDlProgress('Done!', 100);
+      setTimeout(() => { hideDlProgress(); closeModal('download-modal'); showToast('Downloaded as Word (.doc) ✓'); }, 700);
+    }
+  } catch(err) {
+    hideDlProgress();
+    showToast('Download failed: ' + err.message);
+  }
+  btn.disabled = false;
+}
+
+// Keep old download btn click handler removed (now handled by modal open in HTML)
 
 // ── Toast ────────────────────────────────────────────────────
 function showToast(msg) {
